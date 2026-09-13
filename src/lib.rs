@@ -15,7 +15,7 @@ pub mod config;
 pub mod proto;
 
 #[cfg(feature = "proto")]
-pub use actor::{Actor, Response};
+pub use actor::{Actor, Response, TileGetter};
 pub use config::Config;
 pub use config::ConfigBuilder;
 pub use ffi::AdminInfo;
