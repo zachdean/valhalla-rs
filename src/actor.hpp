@@ -12,6 +12,15 @@ struct Response;
 struct Actor;
 #include "valhalla/src/actor.rs.h"
 
+// Additive: `tile_getter.hpp` (new file, for `Actor::with_tile_getter`) uses `rust::Box<...>`
+// and the generated `RustTileGetter` type, both of which only exist after the `#include` right
+// above has run -- `cxx` emits its own `namespace rust { ... }` boilerplate and the
+// `RustTileGetter` forward declaration *inside* `actor.rs.h`, textually after the copy of this
+// same include list it puts at that generated file's own top. Including it any earlier (e.g.
+// from `src/actor.rs`'s bridge directly, alongside `include!("valhalla/src/actor.hpp")`) hits
+// exactly that ordering trap: `tile_getter.hpp` would be pulled in before `rust::Box` exists.
+#include "valhalla/src/tile_getter.hpp"
+
 /// Copy&paste of the `valhalla::tyr::actor_t` class, but without the parsing json request format.
 struct Actor final {
   std::shared_ptr<valhalla::baldr::GraphReader> reader;
@@ -24,6 +33,22 @@ struct Actor final {
 
   Actor(const boost::property_tree::ptree& config)
       : reader(std::make_shared<valhalla::baldr::GraphReader>(config.get_child("mjolnir"))),
+        loki_worker(config, reader),
+        thor_worker(config, reader),
+        odin_worker(config) {
+    if (reader->GetTileSet().empty()) {
+      throw std::runtime_error("Failed to load tileset");
+    }
+  }
+
+  /// Additive overload: same as above, but forwards `tile_getter` into `GraphReader` so it is
+  /// consulted for any tile missing from `mjolnir.tile_dir`/`tile_extract`, instead of the
+  /// `GraphReader` only ever answering from what's already on disk. See `tile_getter.hpp`'s
+  /// `new_actor_with_tile_getter()` (the only caller of this overload) for the full contract,
+  /// in particular why `config`'s `mjolnir.tile_url` must be a non-empty sentinel for
+  /// `tile_getter` to be consulted at all.
+  Actor(const boost::property_tree::ptree& config, std::unique_ptr<valhalla::baldr::tile_getter_t> tile_getter)
+      : reader(std::make_shared<valhalla::baldr::GraphReader>(config.get_child("mjolnir"), std::move(tile_getter))),
         loki_worker(config, reader),
         thor_worker(config, reader),
         odin_worker(config) {
@@ -151,6 +176,18 @@ private:
 
 std::unique_ptr<Actor> new_actor(const boost::property_tree::ptree& config) {
   return std::make_unique<Actor>(config);
+}
+
+/// Additive: constructs an `Actor` whose `GraphReader` consults `getter` for any tile missing
+/// from `mjolnir.tile_dir`/`tile_extract`, instead of only ever answering from what's already on
+/// disk. Defined here (next to `new_actor`, not in `tile_getter.hpp`) because this is the one
+/// file that already legitimately needs the complete `Actor` type in the same translation unit
+/// -- see `tile_getter.hpp`'s top comment for why giving this its own `.cpp` instead broke the
+/// build. Full contract on the `mjolnir.tile_url` sentinel this requires: `Actor::with_tile_getter`
+/// in `src/actor.rs`, the only caller.
+std::unique_ptr<Actor> new_actor_with_tile_getter(const boost::property_tree::ptree& config,
+                                                  rust::Box<RustTileGetter> getter) {
+  return std::make_unique<Actor>(config, std::make_unique<RustTileGetterAdapter>(std::move(getter)));
 }
 
 std::unique_ptr<std::string> parse_json_request(rust::Str json, int action) {
